@@ -27,7 +27,7 @@ class Mamba(environment.Environment):
     def __init__(self, conf, python, requirements, tagged_env_vars):
         if mamba is None:
             raise environment.EnvironmentUnavailable(
-                "asv_mamba requires libmambapy (install from conda-forge); "
+                "asv_env_mamba requires libmambapy (install from conda-forge); "
                 "for the classic conda CLI use asv_env_conda instead"
             )
         self._python = python
@@ -86,7 +86,7 @@ class Mamba(environment.Environment):
         elif Solver is not None and Pool is not None:
             # Minimal solve/transaction path — exact API differs; fail clearly if incomplete
             raise environment.EnvironmentUnavailable(
-                "libmambapy is importable but this asv_mamba build needs a "
+                "libmambapy is importable but this asv_env_mamba build needs a "
                 "libmambapy version exposing a high-level create/install helper; "
                 "upgrade libmambapy or use asv_env_rattler (py-rattler API)"
             )
