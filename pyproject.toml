@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asv_env_mamba"
+version = "0.1.0"
+description = "ASV environment plugin (mamba) — install and list in asv.conf.json plugins"
+requires-python = ">=3.9"
+dependencies = ["asv>=0.6.5"]
+
+[project.entry-points."asv.plugins"]
+mamba = "asv_env_mamba"
+
+[tool.setuptools.packages.find]
+include = ["asv_env_mamba*"]
