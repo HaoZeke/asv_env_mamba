@@ -4,13 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "asv_env_mamba"
-version = "0.1.0"
-description = "ASV environment plugin (mamba) — install and list in asv.conf.json plugins"
-requires-python = ">=3.9"
+version = "0.2.0"
+description = "ASV environment backend for environment_type=mamba (libmambapy and/or micromamba CLI)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "BSD-3-Clause" }
 dependencies = ["asv>=0.6.5"]
 
+[project.optional-dependencies]
+api = ["libmambapy"]
+test = ["pytest"]
+
+[project.entry-points."asv.environment_backends"]
+mamba = "asv_env_mamba:Mamba"
+
 [project.entry-points."asv.plugins"]
-mamba = "asv_env_mamba"
+mamba = "asv_env_mamba:Mamba"
 
 [tool.setuptools.packages.find]
 include = ["asv_env_mamba*"]

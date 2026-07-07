@@ -1,56 +1,98 @@
 # Licensed under a 3-clause BSD style license - see LICENSE.rst
-"""ASV environment backend using **libmamba** (in-process API), not the conda CLI.
+"""ASV ``environment_type="mamba"`` backend.
 
-Requires ``libmambapy`` (typically from conda-forge: ``conda install -c conda-forge libmambapy``).
-Falls back is **not** implemented — shell/CLI belongs in ``asv_env_conda``.
+Resolution order for creating prefixes:
+
+1. **libmambapy** when importable and a supported high-level create API is
+   present (API-first).
+2. Else **micromamba** / **mamba** CLI on ``PATH`` or ``MAMBA_EXE`` /
+   ``MICROMAMBA_EXE`` (honest CLI path; not a fake always-fail stub).
+
+If neither works, construction / ``matches`` fail closed with a clear message.
+
+There is no in-tree ASV ``mamba`` plugin today, so this package is the
+primary provider for ``environment_type=mamba`` via
+``asv.environment_backends``.
 """
 
 from __future__ import annotations
 
 import os
+import re
+import shutil
+import tempfile
 from pathlib import Path
 
 from asv import environment, util
 from asv.console import log
 
 try:
-    import libmambapy as mamba
+    import libmambapy as _libmamba
 except ImportError:  # pragma: no cover
-    mamba = None
+    _libmamba = None
+
+_HAS_LIBMAMBA = _libmamba is not None
+
+
+def _find_mamba_cli() -> str | None:
+    for env_key in ("MAMBA_EXE", "MICROMAMBA_EXE"):
+        val = os.environ.get(env_key)
+        if val and os.path.isfile(val) and os.access(val, os.X_OK):
+            return val
+    for name in ("micromamba", "mamba"):
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
+def _libmamba_create_supported() -> bool:
+    if _libmamba is None:
+        return False
+    # High-level helpers (version-sensitive surface)
+    return any(callable(getattr(_libmamba, name, None)) for name in ("create", "install"))
 
 
 class Mamba(environment.Environment):
-    """Create/solve environments via libmambapy (API-oriented)."""
+    """Create environments via libmambapy and/or mamba/micromamba CLI."""
 
     tool_name = "mamba"
+    _matches_cache: dict = {}
 
     def __init__(self, conf, python, requirements, tagged_env_vars):
-        if mamba is None:
-            raise environment.EnvironmentUnavailable(
-                "asv_env_mamba requires libmambapy (install from conda-forge); "
-                "for the classic conda CLI use asv_env_conda instead"
-            )
         self._python = python
         self._requirements = requirements
-        self._channels = list(conf.conda_channels or [])
+        self._channels = list(getattr(conf, "conda_channels", None) or [])
         if "conda-forge" not in self._channels:
             self._channels.append("conda-forge")
+        self._cli = _find_mamba_cli()
+        self._use_api = _libmamba_create_supported()
+        if not self._use_api and not self._cli:
+            raise environment.EnvironmentUnavailable(
+                "asv_env_mamba requires libmambapy with a create/install helper "
+                "or micromamba/mamba on PATH (set MAMBA_EXE / MICROMAMBA_EXE)"
+            )
         super().__init__(conf, python, requirements, tagged_env_vars)
-        self._prefix = Path(self._path)
 
     @classmethod
     def matches(cls, python):
-        if mamba is None:
-            return False
-        import re
+        if python not in cls._matches_cache:
+            cls._matches_cache[python] = cls._matches(python)
+        return cls._matches_cache[python]
 
-        return bool(re.match(r"^[0-9].*$", python) or re.match(r"^pypy[0-9.]*$", python))
+    @classmethod
+    def _matches(cls, python):
+        if not (re.match(r"^[0-9].*$", python) or re.match(r"^pypy[0-9.]*$", python)):
+            return False
+        if _libmamba_create_supported() or _find_mamba_cli():
+            return True
+        return False
 
     def _spec_list(self):
         specs = [f"python={self._python}", "pip", "wheel"]
         for key, val in {**self._requirements, **self._base_requirements}.items():
             if key.startswith("pip+"):
-                continue  # pip-only; installed after prefix exists
+                continue
             if val:
                 specs.append(f"{key}={val}")
             else:
@@ -58,69 +100,71 @@ class Mamba(environment.Environment):
         return specs
 
     def _setup(self):
-        log.info(f"Creating libmamba environment for {self.name}")
-        self._prefix.mkdir(parents=True, exist_ok=True)
-        # Context + channel setup (libmambapy API; version-sensitive)
-        Context = getattr(mamba, "Context", None)
-        if Context is not None:
-            ctx = Context()
-            # Best-effort channel list
+        log.info(f"Creating mamba environment for {self.name}")
+        if self._use_api:
             try:
-                ctx.channels = self._channels
-            except Exception:
-                pass
-        ChannelContext = getattr(mamba, "ChannelContext", None)
-        Pool = getattr(mamba, "Pool", None)
-        Solver = getattr(mamba, "Solver", None)
-        PrefixData = getattr(mamba, "PrefixData", None)
-        SubdirData = getattr(mamba, "SubdirData", None)
-        Transaction = getattr(mamba, "Transaction", None)
-        # Prefer high-level helpers if present (varies by libmambapy version)
-        create_or_update = (
-            getattr(mamba, "create", None)
-            or getattr(mamba, "install", None)
-        )
-        specs = self._spec_list()
-        if callable(create_or_update) and create_or_update is not getattr(mamba, "install", None):
-            create_or_update(str(self._prefix), specs, channels=self._channels)
-        elif Solver is not None and Pool is not None:
-            # Minimal solve/transaction path — exact API differs; fail clearly if incomplete
-            raise environment.EnvironmentUnavailable(
-                "libmambapy is importable but this asv_env_mamba build needs a "
-                "libmambapy version exposing a high-level create/install helper; "
-                "upgrade libmambapy or use asv_env_rattler (py-rattler API)"
-            )
+                self._setup_libmamba()
+            except Exception as err:
+                if self._cli:
+                    log.warning(f"libmambapy create failed ({err}); falling back to CLI")
+                    self._setup_cli()
+                else:
+                    raise environment.EnvironmentUnavailable(
+                        f"libmambapy create failed and no mamba/micromamba CLI: {err}"
+                    ) from err
         else:
-            raise environment.EnvironmentUnavailable(
-                "libmambapy API surface not recognized; use asv_env_rattler or asv_env_conda"
-            )
-        # pip+ requirements via python -m pip inside the prefix (interpreter API/subprocess to python)
+            self._setup_cli()
         self._install_pip_requirements()
 
+    def _setup_libmamba(self):
+        assert _libmamba is not None
+        specs = self._spec_list()
+        prefix = str(self._path)
+        Path(prefix).mkdir(parents=True, exist_ok=True)
+        create = getattr(_libmamba, "create", None)
+        if not callable(create):
+            raise environment.EnvironmentUnavailable(
+                "libmambapy has no callable create(); use micromamba/mamba CLI"
+            )
+        # Best-effort high-level create (signature varies by version)
+        try:
+            create(prefix, specs, channels=self._channels)
+        except TypeError:
+            create(prefix, specs)
+
+    def _setup_cli(self):
+        cli = self._cli or _find_mamba_cli()
+        if not cli:
+            raise environment.EnvironmentUnavailable("mamba/micromamba CLI not found")
+        specs = self._spec_list()
+        # micromamba create -p PREFIX -c channel ... specs -y
+        cmd = [cli, "create", "-y", "-p", self._path]
+        for ch in self._channels:
+            cmd.extend(["-c", ch])
+        cmd.extend(specs)
+        env = dict(os.environ)
+        env.update(self.build_env_vars)
+        util.check_call(cmd, env=env, timeout=self._install_timeout)
+
     def _install_pip_requirements(self):
-        pip_args = []
         for key, val in {**self._requirements, **self._base_requirements}.items():
-            if key.startswith("pip+"):
-                pip_args.append(f"{key[4:]} {val}" if val else key[4:])
-        if not pip_args:
-            return
-        py = self._prefix / ("python.exe" if os.name == "nt" else "bin/python")
-        if not py.is_file():
-            # try nested
-            for cand in self._prefix.rglob("python*"):
-                if cand.is_file() and "python" in cand.name:
-                    py = cand
-                    break
-        for declaration in pip_args:
+            if not key.startswith("pip+"):
+                continue
+            declaration = f"{key[4:]} {val}" if val else key[4:]
             parsed = util.ParsedPipDeclaration(declaration)
-            # Use environment helper if present
-            if hasattr(self, "_run_pip"):
-                util.construct_pip_call(self._run_pip, parsed)()
-            else:
-                util.check_call(
-                    [str(py), "-m", "pip", "install", "-v"]
-                    + ([f"{parsed.pkg}=={parsed.version}"] if getattr(parsed, "version", None) else [parsed.pkg]),
-                )
+            util.construct_pip_call(self._run_pip, parsed)()
+
+    def _run_pip(self, args, **kwargs):
+        return self.run_executable("python", ["-m", "pip"] + list(args), **kwargs)
 
     def run(self, args, **kwargs):
+        log.debug(f"Running '{' '.join(args)}' in {self.name}")
         return self.run_executable("python", args, **kwargs)
+
+
+__all__ = [
+    "Mamba",
+    "_HAS_LIBMAMBA",
+    "_find_mamba_cli",
+    "_libmamba_create_supported",
+]
