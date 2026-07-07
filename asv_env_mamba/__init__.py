@@ -1,18 +1,14 @@
 # Licensed under a 3-clause BSD style license - see LICENSE.rst
 """ASV ``environment_type="mamba"`` backend.
 
-Resolution order for creating prefixes:
+Resolution order:
 
-1. **libmambapy** when importable and a supported high-level create API is
-   present (API-first).
-2. Else **micromamba** / **mamba** CLI on ``PATH`` or ``MAMBA_EXE`` /
-   ``MICROMAMBA_EXE`` (honest CLI path; not a fake always-fail stub).
+1. **libmambapy** when importable and a supported high-level create API exists.
+2. Else a **working** micromamba/mamba CLI (``--version`` succeeds).
 
-If neither works, construction / ``matches`` fail closed with a clear message.
+Broken stubs on PATH are skipped. Fail closed when neither path works.
 
-There is no in-tree ASV ``mamba`` plugin today, so this package is the
-primary provider for ``environment_type=mamba`` via
-``asv.environment_backends``.
+Core ASV does not ship an in-tree mamba backend; this package is the provider.
 """
 
 from __future__ import annotations
@@ -20,7 +16,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import tempfile
+import subprocess
 from pathlib import Path
 
 from asv import environment, util
@@ -34,27 +30,48 @@ except ImportError:  # pragma: no cover
 _HAS_LIBMAMBA = _libmamba is not None
 
 
+def _cli_works(path: str) -> bool:
+    try:
+        r = subprocess.run(
+            [path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def _find_mamba_cli() -> str | None:
-    for env_key in ("MAMBA_EXE", "MICROMAMBA_EXE"):
+    candidates = []
+    for env_key in ("MAMBA_EXE", "MICROMAMBA_EXE", "ASV_MAMBA_EXE"):
         val = os.environ.get(env_key)
-        if val and os.path.isfile(val) and os.access(val, os.X_OK):
-            return val
+        if val:
+            candidates.append(val)
     for name in ("micromamba", "mamba"):
         path = shutil.which(name)
         if path:
-            return path
+            candidates.append(path)
+    seen = set()
+    for cand in candidates:
+        if cand in seen:
+            continue
+        seen.add(cand)
+        if os.path.isfile(cand) and os.access(cand, os.X_OK) and _cli_works(cand):
+            return cand
     return None
 
 
 def _libmamba_create_supported() -> bool:
     if _libmamba is None:
         return False
-    # High-level helpers (version-sensitive surface)
     return any(callable(getattr(_libmamba, name, None)) for name in ("create", "install"))
 
 
 class Mamba(environment.Environment):
-    """Create environments via libmambapy and/or mamba/micromamba CLI."""
+    """Create environments via libmambapy and/or working mamba/micromamba CLI."""
 
     tool_name = "mamba"
     _matches_cache: dict = {}
@@ -69,8 +86,9 @@ class Mamba(environment.Environment):
         self._use_api = _libmamba_create_supported()
         if not self._use_api and not self._cli:
             raise environment.EnvironmentUnavailable(
-                "asv_env_mamba requires libmambapy with a create/install helper "
-                "or micromamba/mamba on PATH (set MAMBA_EXE / MICROMAMBA_EXE)"
+                "asv_env_mamba requires a working micromamba/mamba CLI "
+                "(set MAMBA_EXE / MICROMAMBA_EXE / ASV_MAMBA_EXE) or libmambapy "
+                "with a create/install helper. Broken binaries on PATH are ignored."
             )
         super().__init__(conf, python, requirements, tagged_env_vars)
 
@@ -84,9 +102,7 @@ class Mamba(environment.Environment):
     def _matches(cls, python):
         if not (re.match(r"^[0-9].*$", python) or re.match(r"^pypy[0-9.]*$", python)):
             return False
-        if _libmamba_create_supported() or _find_mamba_cli():
-            return True
-        return False
+        return bool(_libmamba_create_supported() or _find_mamba_cli())
 
     def _spec_list(self):
         specs = [f"python={self._python}", "pip", "wheel"]
@@ -110,7 +126,7 @@ class Mamba(environment.Environment):
                     self._setup_cli()
                 else:
                     raise environment.EnvironmentUnavailable(
-                        f"libmambapy create failed and no mamba/micromamba CLI: {err}"
+                        f"libmambapy create failed and no working mamba/micromamba CLI: {err}"
                     ) from err
         else:
             self._setup_cli()
@@ -126,7 +142,6 @@ class Mamba(environment.Environment):
             raise environment.EnvironmentUnavailable(
                 "libmambapy has no callable create(); use micromamba/mamba CLI"
             )
-        # Best-effort high-level create (signature varies by version)
         try:
             create(prefix, specs, channels=self._channels)
         except TypeError:
@@ -135,16 +150,21 @@ class Mamba(environment.Environment):
     def _setup_cli(self):
         cli = self._cli or _find_mamba_cli()
         if not cli:
-            raise environment.EnvironmentUnavailable("mamba/micromamba CLI not found")
+            raise environment.EnvironmentUnavailable("working mamba/micromamba CLI not found")
         specs = self._spec_list()
-        # micromamba create -p PREFIX -c channel ... specs -y
         cmd = [cli, "create", "-y", "-p", self._path]
         for ch in self._channels:
             cmd.extend(["-c", ch])
         cmd.extend(specs)
         env = dict(os.environ)
         env.update(self.build_env_vars)
-        util.check_call(cmd, env=env, timeout=self._install_timeout)
+        try:
+            util.check_call(cmd, env=env, timeout=self._install_timeout)
+        except util.ProcessError as err:
+            raise environment.EnvironmentUnavailable(
+                f"mamba/micromamba create failed for python={self._python!r}: {err}. "
+                "Try another Python version or reinstall micromamba/mamba."
+            ) from err
 
     def _install_pip_requirements(self):
         for key, val in {**self._requirements, **self._base_requirements}.items():
@@ -167,4 +187,5 @@ __all__ = [
     "_HAS_LIBMAMBA",
     "_find_mamba_cli",
     "_libmamba_create_supported",
+    "_cli_works",
 ]

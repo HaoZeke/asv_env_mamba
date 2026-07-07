@@ -1,6 +1,6 @@
 # Licensed under a 3-clause BSD style license - see LICENSE.rst
 import asv_env_mamba
-from asv_env_mamba import Mamba, _find_mamba_cli, _libmamba_create_supported
+from asv_env_mamba import Mamba, _find_mamba_cli, _libmamba_create_supported, _cli_works
 
 
 def test_tool_name():
@@ -8,12 +8,17 @@ def test_tool_name():
 
 
 def test_matches_with_cli_or_api():
-    # Host may have micromamba; matches must not crash
     result = Mamba.matches("3.12")
     assert result in (True, False)
     assert Mamba.matches("not-a-version") is False
     if _find_mamba_cli() or _libmamba_create_supported():
         assert result is True
+    else:
+        assert result is False
+
+
+def test_cli_works_rejects_missing(tmp_path):
+    assert _cli_works(str(tmp_path / "missing")) is False
 
 
 def test_entry_point_metadata():
