@@ -1,5 +1,7 @@
 # asv_env_mamba
 
+> **Not a Rust/maturin backend.** Primary path: mamba/libmambapy (not a Rust/maturin backend). For Rust-backed conda-ecosystem creates use asv_env_rattler / asv_env_pixi (py-rattler).
+
 ASV environment backend for `environment_type = "mamba"`.
 
 ## How it creates environments
