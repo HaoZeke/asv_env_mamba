@@ -74,6 +74,11 @@ class Mamba(environment.Environment):
     """Create environments via libmambapy and/or working mamba/micromamba CLI."""
 
     tool_name = "mamba"
+    matrix_install_mode = "create"
+    supports_joint_pypi_conda_solve = False
+    supports_joint_pypi_solve = False
+    project_install_prefers_no_deps = False
+    requires_host_tool = "mamba"
     _matches_cache: dict = {}
 
     def __init__(self, conf, python, requirements, tagged_env_vars):

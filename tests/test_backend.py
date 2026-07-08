@@ -40,3 +40,4 @@ def test_source_documents_fail_closed_paths():
     src = inspect.getsource(asv_env_mamba)
     assert "EnvironmentUnavailable" in src
     assert "_find_mamba_cli" in src
+

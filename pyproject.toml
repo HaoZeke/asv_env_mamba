@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "asv_env_mamba"
-version = "0.2.1"
+version = "0.2.2"
 description = "ASV environment backend for environment_type=mamba (libmambapy and/or micromamba CLI)"
 readme = "README.md"
 requires-python = ">=3.10"

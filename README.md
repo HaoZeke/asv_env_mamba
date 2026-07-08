@@ -1,36 +1,45 @@
 # asv_env_mamba
 
-> **Not a Rust/maturin backend.** Primary path: mamba/libmambapy (not a Rust/maturin backend). For Rust-backed conda-ecosystem creates use asv_env_rattler / asv_env_pixi (py-rattler).
+Drop-in ASV backend for `environment_type = "mamba"`.
 
-ASV environment backend for `environment_type = "mamba"`.
+Resolution order:
 
-## How it creates environments
+1. **libmambapy** when importable with a supported high-level create API
+2. Else a **working** micromamba/mamba CLI (`--version` succeeds)
 
-1. **libmambapy** (optional extra `asv_env_mamba[api]`) when a high-level
-   `create`/`install` helper is available.
-2. Else **micromamba** or **mamba** CLI (`PATH`, or `MAMBA_EXE` /
-   `MICROMAMBA_EXE`).
+Broken stubs on PATH are skipped.
 
-If neither is available, resolve/`Environment` construction **fail closed**
-with a clear message (no installable-but-always-broken stub).
+## Drop-in setup
 
-There is no in-tree ASV `mamba` plugin; this package is the primary provider
-for this type under Stage-1 discovery.
+```bash
+# micromamba/mamba on PATH, or set MAMBA_EXE / MICROMAMBA_EXE / ASV_MAMBA_EXE
+pip install asv
+pip install "git+https://github.com/HaoZeke/asv_env_mamba.git"
+# optional API path:
+# pip install "asv_env_mamba[api]"
+```
 
-## Stage-1 discovery
+```json
+{
+  "environment_type": "mamba",
+  "conda_channels": ["conda-forge"],
+  "pythons": ["3.12"]
+}
+```
+
+## Capabilities
+
+| Flag | Value |
+|------|-------|
+| `matrix_install_mode` | `create` |
+| `supports_joint_pypi_conda_solve` | `False` |
+| `requires_host_tool` | `mamba` |
+
+## Discovery
 
 ```toml
 [project.entry-points."asv.environment_backends"]
 mamba = "asv_env_mamba:Mamba"
-```
-
-```bash
-pip install "git+https://github.com/HaoZeke/asv_env_mamba.git"
-# optional: conda install libmambapy  # then pip install 'asv_env_mamba[api]'
-```
-
-```json
-{ "environment_type": "mamba" }
 ```
 
 ## Tests
